@@ -73,7 +73,7 @@ export default function ChatWorkspace({ quickPrompts = [], onClose, compact = fa
         assistant.content += chunk
         setMessages((m) => [...m.slice(0, -1), { ...assistant }])
       }
-    } catch (err) {
+    } catch {
       assistant.content = assistant.content || 'Something went wrong reaching the agent. Please try again.'
       setMessages((m) => [...m.slice(0, -1), { ...assistant }])
     } finally {

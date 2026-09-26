@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Security — secret scan
+        run: |
+          # Fail if any Groq/xAI/Exa key pattern appears in tracked files
+          if git grep -nIE '(gsk_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,})' -- . ':!package-lock.json'; then
+            echo "::error::Potential API key committed"
+            exit 1
+          fi
+          echo "No secrets found ✓"

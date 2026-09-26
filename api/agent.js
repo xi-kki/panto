@@ -1,58 +1,59 @@
 /**
  * Panto agent endpoint — Vercel Serverless Function.
  *
- * POST /api/agent  { message, role, history? }
+ * POST /api/agent  { message, role, history?, platforms?, username? }
  * → text/event-stream, `data: <chunk>\n\n` per token.
  *
- * Brain:   Any OpenAI-compatible provider — Groq first (free tier), xAI Grok
- *          as fallback. Streaming chat.completions.
- * Search:  Exa (/search) for Door 1 — Discovery, formatted into the prompt.
- * Fallback: no keys configured → deterministic simulated agent (demo works,
- *           zero secrets on a public deploy).
+ * Brain:     Groq (free tier) → xAI Grok fallback. Streaming chat.completions.
+ * Door 1:    /api/social-search — Groq-routed, Exa platform-scoped discovery
+ *            (Instagram, TikTok, LinkedIn, X) + broad Exa fallback.
+ * Door 2:    /api/profile-check — qeeqbox/social-analyzer (1000+ platforms)
+ *            verifies social footprint when a username is mentioned.
+ * Demo mode: no keys → deterministic simulated agent (always works).
  *
  * Keys are server-only (never shipped to the browser).
  */
 
-// ── Config — provider chain: Groq (free tier) → xAI Grok → demo mode ──────────────────────────────────────────────────────────────
-const LLM_KEY = process.env.GROQ_API_KEY || process.env.XAI_API_KEY
-const LLM_BASE =
-  process.env.LLM_API_BASE ||
+// ── Config ────────────────────────────────────────────────────────────────────
+const LLM_KEY   = process.env.GROQ_API_KEY || process.env.XAI_API_KEY
+const LLM_BASE  = process.env.LLM_API_BASE ||
   (process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.x.ai/v1')
-const LLM_MODEL =
-  process.env.LLM_MODEL ||
+const LLM_MODEL = process.env.LLM_MODEL ||
   (process.env.GROQ_API_KEY ? 'openai/gpt-oss-120b' : 'grok-4-fast')
-// Fallback chain: if the primary model 404s (model left the free tier, etc.),
-// retry these before giving up. Filtered by provider.
 const LLM_MODEL_FALLBACKS = process.env.GROQ_API_KEY
   ? ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'allam-2-7b']
   : []
-const EXA_KEY = process.env.EXA_API_KEY
-const EXA_BASE = process.env.EXA_API_BASE || 'https://api.exa.ai'
+
+// Internal API base — same Vercel deployment
+const INTERNAL_BASE = process.env.VERCEL_URL
+  ? `https://${process.env.VERCEL_URL}`
+  : 'http://localhost:3000'
 
 export const maxDuration = 60
 
-// ── Panto system prompt (stable prefix → cheap provider-side caching) ──
+// ── System prompt ─────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are Panto, the AI sourcing and matchmaking agent built specifically for food tech.
 Panto means "door" in Sundanese. You open five doors between food-tech buyers and sellers:
-1. Discovery — deep search across the platforms the user prefers (Instagram, TikTok, LinkedIn, X, WhatsApp communities).
-2. Compliance — check food/agricultural certifications and legitimacy before any introduction.
-3. Warm Intro — hyper-personalized introduction drafts for both sides.
-4. Negotiation Prep — briefs with volume, quality, and market context.
-5. Deal Follow-Up — persistent, gentle follow-up until the deal closes or clearly dies.
+1. Discovery   — deep search across Instagram, TikTok, LinkedIn, X, WhatsApp communities.
+2. Compliance  — verify social footprint, food/agri certifications, and legitimacy.
+3. Warm Intro  — hyper-personalized introduction drafts for both sides.
+4. Negotiation — briefs with volume, quality, and market context.
+5. Follow-Up   — persistent, gentle follow-up until the deal closes or clearly dies.
 
 RULES:
 - Plain language. Short paragraphs. Warm and direct, never corporate.
 - Show your reasoning briefly — the user should see WHY each match is promising.
-- Never fabricate specific suppliers, prices, certifications, or contact details. If you have no live search results, say what you WOULD search and what to verify.
+- When citing search results, name the platform and link: e.g. "📸 @greenfarm on Instagram (instagram.com/greenfarm)".
+- Never fabricate suppliers, prices, certifications, or contact details.
 - You draft; the user approves. Never claim to have sent anything.
-- Suggest the next concrete step (approve a draft, pick platforms, verify a certificate).`
+- Always suggest the next concrete step (approve a draft, pick platforms, verify a profile).`
 
 const PLATFORM_NOTE = {
-  buying: 'The user is BUYING (seeds, land, ingredients, packaging, equipment, finished goods). Help them find and verify suppliers.',
-  selling: 'The user is SELLING (produce, inputs, equipment, processing capacity). Help them reach verified buyers.',
+  buying:  'The user is BUYING (seeds, land, ingredients, packaging, equipment, finished goods). Find and verify suppliers.',
+  selling: 'The user is SELLING (produce, inputs, equipment, processing capacity). Find verified buyers.',
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function ssePayloads(stream) {
   const reader = stream.getReader()
   const dec = new TextDecoder()
@@ -67,44 +68,88 @@ function ssePayloads(stream) {
         buf = lines.pop() || ''
         for (const line of lines) {
           const t = line.trim()
-          if (t.startsWith('data:')) yield t.slice(5).trim() // bare payload
+          if (t.startsWith('data:')) yield t.slice(5).trim()
         }
       }
     },
   }
 }
 
-/** Door 1 — Discovery via Exa. Returns formatted context or null. */
-async function exaSearch(query) {
-  if (!EXA_KEY) return null
+// ── Door 1: Platform-scoped social search (Groq routing + Exa) ───────────────
+async function socialSearch(message, role, platforms) {
   try {
-    const res = await fetch(`${EXA_BASE}/search`, {
+    const res = await fetch(`${INTERNAL_BASE}/api/social-search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': EXA_KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        query,
-        numResults: 6,
-        startPublishedDate: new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10),
-        contents: { text: { maxCharacters: 700 } },
+        query: `${role === 'selling' ? 'buyers of' : 'suppliers of'} ${message}`.slice(0, 300),
+        role,
+        platforms: platforms || [],
       }),
-      signal: AbortSignal.timeout(9000),
+      signal: AbortSignal.timeout(20000),
     })
     if (!res.ok) return null
     const data = await res.json()
-    const results = (data.results || []).map(
-      (r, i) => `${i + 1}. ${r.title || 'Untitled'} — ${r.url}\n   ${String(r.text || '').replace(/\s+/g, ' ').slice(0, 400)}`
-    )
-    return results.length ? results.join('\n\n') : null
+
+    if (!data.results?.length) return data.plan ? `Search plan: ${data.plan}` : null
+
+    const lines = [`${data.plan || ''}`, '']
+    data.results.forEach((r, i) => {
+      lines.push(
+        `${i + 1}. ${r.emoji || '🔍'} [${r.label}] ${r.title} — ${r.url}` +
+        (r.relevance ? ` (relevance: ${(r.relevance * 100).toFixed(0)}%)` : '') +
+        (r.snippet ? `\n   ${r.snippet.slice(0, 300)}` : '')
+      )
+    })
+    return lines.join('\n')
   } catch {
-    return null // search failure must never break the chat
+    return null
   }
 }
 
-/** Fallback simulated agent (used when no LLM provider key is configured). */
+// ── Door 2: Profile verification via social-analyzer ─────────────────────────
+async function profileCheck(username) {
+  if (!username) return null
+  try {
+    const res = await fetch(`${INTERNAL_BASE}/api/profile-check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, filter: 'good' }),
+      signal: AbortSignal.timeout(25000),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!data.profiles?.length) return `No confirmed profiles found for @${username}.`
+
+    const found = data.profiles.filter((p) => p.rate >= 60)
+    if (!found.length) return `@${username} checked — no high-confidence profiles found.`
+
+    const lines = [data.summary, '']
+    found.slice(0, 6).forEach((p) => {
+      lines.push(`• ${p.platform}: ${p.url}${p.title ? ` — "${p.title}"` : ''} (${p.confidence} confidence)`)
+    })
+    return lines.join('\n')
+  } catch {
+    return null
+  }
+}
+
+// ── Extract username if mentioned in message ──────────────────────────────────
+function extractUsername(message) {
+  // Match @username or "username X" or "verify X" or "check X"
+  const atMatch = message.match(/@([a-z0-9._-]{2,30})/i)
+  if (atMatch) return atMatch[1].toLowerCase()
+  const verbMatch = message.match(/(?:verify|check|profile|compliance)[:\s]+([a-z0-9._-]{2,30})/i)
+  if (verbMatch) return verbMatch[1].toLowerCase()
+  return null
+}
+
+// ── Demo mode simulated reply ─────────────────────────────────────────────────
 function simulatedReply(message, role) {
   const t = message.toLowerCase()
-  const topic = /seed/.test(t) ? 'organic seed suppliers'
-    : /land|hectare|acre/.test(t) ? 'landowners and farm plots'
+  const topic =
+    /seed/.test(t)                      ? 'organic seed suppliers'
+    : /land|hectare|acre/.test(t)       ? 'landowners and farm plots'
     : /packag|carton|label|pouch/.test(t) ? 'food packaging manufacturers'
     : /equipment|machine|process/.test(t) ? 'food-processing equipment makers'
     : 'food-tech suppliers and buyers'
@@ -112,49 +157,46 @@ function simulatedReply(message, role) {
 
 You said: "${message}". Here's how I'd hunt for **${topic}**${role === 'selling' ? ' — and buyers for what you sell' : ''}:
 
-1. **Discovery** — I'd sweep Instagram, TikTok, LinkedIn, X and WhatsApp communities for active ${topic}, prioritized by your preferred platforms.
-2. **Compliance** — for each candidate, I'd verify food/agri certifications and legitimacy before proposing an intro.
-3. **Warm intro** — I'd draft a personalized message for both sides for your approval.
+1. **Door 1 — Discovery** 📸🎵💼𝕏  
+   Groq routes your query to the right platforms, then Exa finds active ${topic} there.
 
-⚠️ Demo mode: the live Groq/Grok brain + search activates as soon as an API key is configured on the server.
+2. **Door 2 — Compliance** 🔍  
+   qeeqbox/social-analyzer checks 1000+ platforms for a real social footprint before any intro.
 
-Tell me: which platforms matter most to you — Instagram, TikTok, LinkedIn, or X?`
+3. **Door 3 — Warm Intro** ✉️  
+   I draft a personalized message for both sides — you approve before anything is sent.
+
+⚠️ Demo mode — add a GROQ_API_KEY to activate the live brain + social search.
+
+Which platforms do you want me to search first? (Instagram, TikTok, LinkedIn, X)`
 }
 
-// ── Handler ─────────────────────────────────────────────────────────────
+// ── Handler ───────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') {
-    res.status(204).end()
-    return
-  }
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed' })
-    return
-  }
+  if (req.method === 'OPTIONS') { res.status(204).end(); return }
+  if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return }
 
   let body
   try {
     body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body
   } catch {
-    res.status(400).json({ error: 'Invalid JSON body' })
-    return
+    res.status(400).json({ error: 'Invalid JSON body' }); return
   }
 
-  const message = String(body?.message || '').slice(0, 4000)
-  const role = body?.role === 'selling' ? 'selling' : 'buying'
-  const history = Array.isArray(body?.history)
+  const message  = String(body?.message || '').slice(0, 4000)
+  const role     = body?.role === 'selling' ? 'selling' : 'buying'
+  const history  = Array.isArray(body?.history)
     ? body.history.slice(-8).map((m) => ({
         role: m.role === 'user' ? 'user' : 'assistant',
         content: String(m.content || '').slice(0, 4000),
       }))
     : []
+  const platforms = Array.isArray(body?.platforms) ? body.platforms : []
+  const explicitUsername = body?.username ? String(body.username).trim() : null
 
-  if (!message.trim()) {
-    res.status(400).json({ error: 'message is required' })
-    return
-  }
+  if (!message.trim()) { res.status(400).json({ error: 'message is required' }); return }
 
-  // ── Demo mode: no key → simulated stream ──
+  // ── Demo mode ─────────────────────────────────────────────────────────────
   if (!LLM_KEY) {
     const reply = simulatedReply(message, role)
     res.status(200)
@@ -168,60 +210,61 @@ export default async function handler(req, res) {
     return
   }
 
-  // ── Live mode: Exa discovery (Door 1) + LLM streaming ──
-  const discovery = await exaSearch(
-    `${role === 'selling' ? 'buyers of' : 'suppliers of'} ${message}`.slice(0, 300)
-  )
-  const contextBlock = discovery
-    ? `LIVE SEARCH RESULTS (Exa, last 12 months — cite these when relevant, never invent others):\n${discovery}`
-    : 'No live search results this turn. Describe your search plan and what to verify; do not invent suppliers.'
+  // ── Live mode: run Door 1 + Door 2 in parallel ────────────────────────────
+  const username = explicitUsername || extractUsername(message)
+  const isComplianceRequest = /verify|compliance|check|legit|certified/i.test(message)
+
+  const [socialResults, profileResults] = await Promise.all([
+    socialSearch(message, role, platforms),
+    // Only run profile-check if a username is found or explicitly requested
+    (username || isComplianceRequest) ? profileCheck(username) : Promise.resolve(null),
+  ])
+
+  // ── Build context block for the LLM ──────────────────────────────────────
+  const contextParts = []
+
+  if (socialResults) {
+    contextParts.push(`DOOR 1 — SOCIAL DISCOVERY (cite platform + URL when referencing these):\n${socialResults}`)
+  } else {
+    contextParts.push('DOOR 1 — No live social results this turn. Describe what you would search and why.')
+  }
+
+  if (profileResults) {
+    contextParts.push(`DOOR 2 — COMPLIANCE CHECK (social-analyzer, 1000+ platforms):\n${profileResults}`)
+  }
+
+  const contextBlock = contextParts.join('\n\n---\n\n')
 
   const messages = [
     { role: 'system', content: `${SYSTEM_PROMPT}\n\nCONTEXT: ${PLATFORM_NOTE[role]}` },
     ...history,
-    { role: 'user', content: `${contextBlock}\n\nUSER MESSAGE: ${message}` },
+    { role: 'user', content: `${contextBlock}\n\n---\n\nUSER MESSAGE: ${message}` },
   ]
 
+  // ── LLM streaming ─────────────────────────────────────────────────────────
   try {
-    // Try the primary model, then the fallback chain, before giving up.
-    // Note: gpt-oss/qwen are reasoning models — cap their thinking so the
-    // token budget reaches actual content.
     const candidates = [LLM_MODEL, ...LLM_MODEL_FALLBACKS]
     let upstream = null
     let usedModel = null
     const attemptLog = []
+
     for (const model of candidates) {
-      const extra = model.includes('qwen')
-        ? { reasoning_effort: 'none' }
-        : model.includes('gpt-oss')
-          ? { reasoning_effort: 'low' }
-          : {}
+      const extra = model.includes('qwen')    ? { reasoning_effort: 'none' }
+        : model.includes('gpt-oss')           ? { reasoning_effort: 'low' }
+        : {}
       const r = await fetch(`${LLM_BASE}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${LLM_KEY}`,
         },
-        body: JSON.stringify({
-          model,
-          messages,
-          stream: true,
-          temperature: 0.6,
-          max_tokens: 2000,
-          ...extra,
-        }),
+        body: JSON.stringify({ model, messages, stream: true, temperature: 0.6, max_tokens: 2000, ...extra }),
         signal: AbortSignal.timeout(55000),
       })
-      if (r.ok && r.body) {
-        upstream = r
-        usedModel = model
-        break
-      }
+      if (r.ok && r.body) { upstream = r; usedModel = model; break }
       const errText = `${model}: ${r.status} ${(await r.text().catch(() => '')).slice(0, 200)}`
       attemptLog.push(errText)
       console.error(`LLM error (${LLM_BASE}):`, errText)
-      // 401/403 = key problem, no point trying other models; 400 may be a
-      // param this model rejects — try the next candidate.
       if (r.status === 401 || r.status === 403) break
     }
 
@@ -235,7 +278,6 @@ export default async function handler(req, res) {
       return
     }
 
-    // Pass through the SSE, normalizing OpenAI-style deltas to plain chunks
     res.status(200)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
     res.setHeader('Cache-Control', 'no-cache, no-transform')
@@ -245,15 +287,9 @@ export default async function handler(req, res) {
       try {
         const json = JSON.parse(payload)
         const delta = json.choices?.[0]?.delta?.content
-        if (delta) {
-          wrote += delta.length
-          res.write(`data: ${JSON.stringify(delta)}\n\n`)
-        }
-      } catch {
-        /* ignore keepalives/malformed frames */
-      }
+        if (delta) { wrote += delta.length; res.write(`data: ${JSON.stringify(delta)}\n\n`) }
+      } catch { /* ignore keepalives */ }
     }
-    // Guard: model produced zero content (e.g. reasoning ate the budget)
     if (wrote === 0) {
       res.setHeader('X-Panto-Debug', `empty-stream-from-${usedModel}`)
       console.error(`Empty stream from ${usedModel} — emitting fallback`)
@@ -266,7 +302,7 @@ export default async function handler(req, res) {
       res.status(200)
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
     }
-    res.write(`data: ${JSON.stringify('\n\n(Panto hit a snag reaching the live brain — try again in a moment.)')}\n\n`)
+    res.write(`data: ${JSON.stringify('\n\n(Panto hit a snag — try again in a moment.)')}\n\n`)
     res.end()
   }
 }
