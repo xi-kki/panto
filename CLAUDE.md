@@ -2,9 +2,16 @@
 
 ## 🎯 Overview
 - **One-liner:** AI sourcing & matchmaking agent for food tech — opening doors between buyers and sellers.
-- **Type:** Web2 (agent-ready frontend, backend seams defined)
-- **Status:** 🟢 v0.1 built — landing + chat widget + auth, agent brain simulated
+- **Type:** Web2 (agent frontend + `/api/agent` serverless brain)
+- **Status:** 🟢 v0.2 LIVE — https://panto-mu.vercel.app · GitHub: xi-kki/panto · Groq brain live (`openai/gpt-oss-120b` + fallback chain) · Exa slot ready (no key yet) · demo auth (Supabase swap points in `lib/auth.js`)
 - **PRD:** `docs/PRD.md` (Master PRD v5 — the source of truth)
+
+## 🔜 NEXT STEPS (explicit)
+1. **Supabase auth** — user pastes `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` → replace demo code path in `lib/auth.js` (points marked `// SUPABASE:`) with `signInWithOtp`/`verifyOtp`, add env vars to Vercel, redeploy.
+2. **Exa discovery** — add `EXA_API_KEY` to Vercel → Door 1 live search activates (code already wired in `api/agent.js exaSearch()`).
+3. **Rotate GROQ_API_KEY** — it was pasted in chat; rotate at console.groq.com and update the Vercel env var.
+4. **Polish** — compare live landing vs `docs/ui-reference.png`, fix mismatches.
+5. **Roadmap v0.3+** — deals DB + Door-5 follow-up scheduler (Supabase tables + cron), Telegram bot (same brain), full chat workspace sidebars (PRD §8).
 
 ## 🏗️ Tech Stack
 - Language: JavaScript (ESM)
