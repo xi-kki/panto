@@ -20,7 +20,12 @@ const LLM_BASE =
   (process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : 'https://api.x.ai/v1')
 const LLM_MODEL =
   process.env.LLM_MODEL ||
-  (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : 'grok-4-fast')
+  (process.env.GROQ_API_KEY ? 'openai/gpt-oss-120b' : 'grok-4-fast')
+// Fallback chain: if the primary model 404s (model left the free tier, etc.),
+// retry these before giving up. Filtered by provider.
+const LLM_MODEL_FALLBACKS = process.env.GROQ_API_KEY
+  ? ['openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'allam-2-7b']
+  : []
 const EXA_KEY = process.env.EXA_API_KEY
 const EXA_BASE = process.env.EXA_API_BASE || 'https://api.exa.ai'
 
@@ -48,8 +53,7 @@ const PLATFORM_NOTE = {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-function sseChunks(stream) {
-  const enc = new TextEncoder()
+function ssePayloads(stream) {
   const reader = stream.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -63,22 +67,11 @@ function sseChunks(stream) {
         buf = lines.pop() || ''
         for (const line of lines) {
           const t = line.trim()
-          if (t.startsWith('data:')) yield enc.encode(t.slice(5).trim() + '\n\n')
+          if (t.startsWith('data:')) yield t.slice(5).trim() // bare payload
         }
       }
     },
   }
-}
-
-function sseResponse(gen, status = 200) {
-  return new Response(gen, {
-    status,
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-    },
-  })
 }
 
 /** Door 1 — Discovery via Exa. Returns formatted context or null. */
@@ -190,26 +183,50 @@ export default async function handler(req, res) {
   ]
 
   try {
-    const upstream = await fetch(`${LLM_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${LLM_KEY}`,
-      },
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        messages,
-        stream: true,
-        temperature: 0.6,
-        max_tokens: 900,
-      }),
-      signal: AbortSignal.timeout(55000),
-    })
+    // Try the primary model, then the fallback chain, before giving up.
+    // Note: gpt-oss/qwen are reasoning models — cap their thinking so the
+    // token budget reaches actual content.
+    const candidates = [LLM_MODEL, ...LLM_MODEL_FALLBACKS]
+    let upstream = null
+    let usedModel = null
+    const attemptLog = []
+    for (const model of candidates) {
+      const extra = model.includes('qwen')
+        ? { reasoning_effort: 'none' }
+        : model.includes('gpt-oss')
+          ? { reasoning_effort: 'low' }
+          : {}
+      const r = await fetch(`${LLM_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${LLM_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: true,
+          temperature: 0.6,
+          max_tokens: 2000,
+          ...extra,
+        }),
+        signal: AbortSignal.timeout(55000),
+      })
+      if (r.ok && r.body) {
+        upstream = r
+        usedModel = model
+        break
+      }
+      const errText = `${model}: ${r.status} ${(await r.text().catch(() => '')).slice(0, 200)}`
+      attemptLog.push(errText)
+      console.error(`LLM error (${LLM_BASE}):`, errText)
+      // 401/403 = key problem, no point trying other models; 400 may be a
+      // param this model rejects — try the next candidate.
+      if (r.status === 401 || r.status === 403) break
+    }
 
-    if (!upstream.ok || !upstream.body) {
-      const detail = await upstream.text().catch(() => '')
-      console.error(`LLM error (${LLM_BASE} / ${LLM_MODEL}):`, upstream.status, detail.slice(0, 300),
-        '| Hint: if 404/ model_not_found, set LLM_MODEL to an id from console.groq.com/docs/models')
+    if (!upstream) {
+      res.setHeader('X-Panto-Debug', `no-upstream | ${attemptLog.join(' || ').slice(0, 400)}`)
       const fallback = simulatedReply(message, role)
       res.status(200)
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
@@ -218,22 +235,29 @@ export default async function handler(req, res) {
       return
     }
 
-    // Pass through Grok's SSE, normalizing OpenAI-style deltas to plain chunks
+    // Pass through the SSE, normalizing OpenAI-style deltas to plain chunks
     res.status(200)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
     res.setHeader('Cache-Control', 'no-cache, no-transform')
-    for await (const evt of sseChunks(upstream.body)) {
-      // evt is an encoded `data: {...}\n\n` line already
-      const raw = new TextDecoder().decode(evt)
-      const payload = raw.slice(6).trim() // strip "data: "
+    let wrote = 0
+    for await (const payload of ssePayloads(upstream.body)) {
       if (payload === '[DONE]') break
       try {
         const json = JSON.parse(payload)
         const delta = json.choices?.[0]?.delta?.content
-        if (delta) res.write(`data: ${JSON.stringify(delta)}\n\n`)
+        if (delta) {
+          wrote += delta.length
+          res.write(`data: ${JSON.stringify(delta)}\n\n`)
+        }
       } catch {
         /* ignore keepalives/malformed frames */
       }
+    }
+    // Guard: model produced zero content (e.g. reasoning ate the budget)
+    if (wrote === 0) {
+      res.setHeader('X-Panto-Debug', `empty-stream-from-${usedModel}`)
+      console.error(`Empty stream from ${usedModel} — emitting fallback`)
+      res.write(`data: ${JSON.stringify(simulatedReply(message, role))}\n\n`)
     }
     res.end()
   } catch (err) {
