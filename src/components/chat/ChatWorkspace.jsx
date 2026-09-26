@@ -69,7 +69,7 @@ export default function ChatWorkspace({ quickPrompts = [], onClose, compact = fa
     setMessages((m) => [...m, assistant])
 
     try {
-      for await (const chunk of sendUserMessage(t, { role })) {
+      for await (const chunk of sendUserMessage(t, { role, history: messages.slice(-8) })) {
         assistant.content += chunk
         setMessages((m) => [...m.slice(0, -1), { ...assistant }])
       }
