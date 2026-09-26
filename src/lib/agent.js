@@ -2,28 +2,31 @@
  * Client-side agent seam.
  *
  * POSTs to same-origin `/api/agent` (Vercel function) and yields text
- * chunks from its SSE stream. When the server has no XAI_API_KEY it
- * streams a simulated demo reply, so the deployed app always works.
+ * chunks from its SSE stream.
  *
- * Server-side toolkit (see docs/AGENT-TOOLKIT.md):
- *   Grok (xAI)  → reasoning + drafting       [XAI_API_KEY]
- *   Exa         → Door 1 discovery search    [EXA_API_KEY]
- *   Bright Data → IG/TikTok/LinkedIn/X       [roadmap v0.3]
- *   Supabase    → memory + deals             [roadmap v0.3]
+ * Server-side toolkit:
+ *   Groq (groq.com) → LLM brain + platform routing  [GROQ_API_KEY]
+ *   Exa             → Door 1 platform-scoped search  [EXA_API_KEY]
+ *   social-analyzer → Door 2 profile verification    [no key needed]
  */
 
 const ENDPOINT = import.meta.env.VITE_AGENT_ENDPOINT || '/api/agent'
 
 /**
  * Send a user message; returns an async iterator of text chunks.
- * Same contract as before — UI never changed.
+ *
+ * @param {string} text          - The user's message
+ * @param {object} opts
+ * @param {string} opts.role     - 'buying' | 'selling'
+ * @param {Array}  opts.history  - Previous messages [{role, content}]
+ * @param {Array}  opts.platforms - Platform filter e.g. ['instagram','linkedin']
+ * @param {string} opts.username - Optional @username to run compliance check on
  */
-export async function* sendUserMessage(text, { role = 'buying', history = [] } = {}) {
+export async function* sendUserMessage(text, { role = 'buying', history = [], platforms = [], username = null } = {}) {
   const res = await fetch(ENDPOINT, {
     method: 'POST',
-    context: undefined,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text, role, history }),
+    body: JSON.stringify({ message: text, role, history, platforms, username }),
   })
 
   if (!res.ok || !res.body) {
@@ -46,10 +49,10 @@ export async function* sendUserMessage(text, { role = 'buying', history = [] } =
       const payload = t.slice(5).trim()
       if (payload === '[DONE]') return
       try {
-        yield JSON.parse(payload) // chunks are JSON-encoded strings
+        yield JSON.parse(payload)
       } catch {
-        yield payload // tolerate plain-text chunks
+        yield payload
       }
-  }
+    }
   }
 }
