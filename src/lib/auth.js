@@ -1,20 +1,34 @@
 /**
- * Authentication — demo mode + Supabase-ready magic code ("seamless auth").
+ * Authentication — demo mode + Supabase magic code ("seamless auth").
  *
  * Demo mode: email → 6-digit code (shown in UI) → session in localStorage.
  * Works with zero configuration.
  *
- * Production: set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY and
- * `npm i @supabase/supabase-js`, then swap the two `// SUPABASE:` points
- * below for `supabase.auth.signInWithOtp` / `verifyOtp`. The UI contract
- * (request → verify → session) stays identical.
+ * Production: set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY (and
+ * `npm i @supabase/supabase-js`) — the Supabase path below activates
+ * automatically. The UI contract (request → verify → session) is unchanged.
  */
+
+import { createClient } from '@supabase/supabase-js'
 
 const SESSION_KEY = 'panto_session'
 const PENDING_KEY = 'panto_pending_code'
 
 const configured = () =>
   Boolean(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY)
+
+/* Lazily create the client only when configured — avoids throwing at import
+   time in demo mode (where env vars are intentionally absent). */
+let client = null
+function supabase() {
+  if (!client) {
+    client = createClient(
+      import.meta.env.VITE_SUPABASE_URL,
+      import.meta.env.VITE_SUPABASE_ANON_KEY,
+    )
+  }
+  return client
+}
 
 function loadSession() {
   try {
@@ -39,7 +53,11 @@ export async function requestAuthCode(email) {
   }
 
   if (configured()) {
-    // SUPABASE: await supabase.auth.signInWithOtp({ email })
+    const { error } = await supabase().auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    })
+    if (error) throw new Error(error.message)
     return {}
   }
 
@@ -53,13 +71,24 @@ export async function requestAuthCode(email) {
 
 /** Step 2 — verify the code. Returns the session object. */
 export async function verifyAuthCode(email, code) {
-  await new Promise((r) => setTimeout(r, 350))
-
   if (configured()) {
-    // SUPABASE: const { data, error } = await supabase.auth.verifyOtp({ email, token: code, type: 'email' })
-    // if (error) throw error; saveSession({ email, ... })
-    throw new Error('Wire Supabase verifyOtp here (see src/lib/auth.js).')
+    const { data, error } = await supabase().auth.verifyOtp({
+      email,
+      token: String(code).trim(),
+      type: 'email',
+    })
+    if (error) throw new Error(error.message)
+    const session = {
+      email: data?.user?.email || email,
+      signedInAt: new Date().toISOString(),
+      role: null,
+      provider: 'supabase',
+    }
+    saveSession(session)
+    return session
   }
+
+  await new Promise((r) => setTimeout(r, 350))
 
   const pending = JSON.parse(sessionStorage.getItem(PENDING_KEY))
   if (!pending || pending.email !== email) {
