@@ -16,12 +16,18 @@
 - [x] Verified prod response times: `/api/social-search` 0.6–1.1s, `/api/profile-check` ~1.0s (correct payload `{username, platform}`) — both HTTP 200
 - [x] Fixed door videos not rendering: source MP4s were MPEG-4 Part 2 (browser-incompatible) → re-encoded to H.264/yuv420p +faststart (40% smaller). Commit + redeploy required.
 
+## ✅ SUPABASE AUTH (done — verified in prod bundle)
+- [x] Keys configured in `.env` + Vercel (`VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`)
+- [x] `signInWithOtp`/`verifyOtp` wired in `src/lib/auth.js`
+- [x] Deployed — `signInWithOtp` + `supabase.co` confirmed in production bundle (2026-09-30)
+
 ## 🔜 TODO (waiting on user)
-### Supabase auth — real magic-link emails
-- [ ] User creates free project: https://index.trygravity.ai/go/508e0e06-4bd5-4c4f-b8c2-df8cf4452bcf
-- [ ] User pastes `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`
-- [ ] Wire `signInWithOtp`/`verifyOtp` in `src/lib/auth.js` (marked `// SUPABASE:`) · `npm i @supabase/supabase-js`
-- [ ] Add env vars in Vercel → redeploy → verify sign-in on prod
+### Supabase auth — verify real magic-link email lands
+- [ ] Send one real OTP sign-in on https://panto-mu.vercel.app and confirm the email arrives (requires Supabase SMTP or default sender rate limits)
+
+### Exa discovery (Door 1) — live search
+- [ ] User gets key at https://exa.ai → pastes `EXA_API_KEY`
+- [ ] Add to Vercel → done (code already wired in `api/agent.js`)
 
 ### Exa discovery (Door 1) — live search
 - [ ] User gets key at https://exa.ai → pastes `EXA_API_KEY`
@@ -34,5 +40,4 @@
 - [ ] Supabase tables: users, matches, deals, follow_ups
 - [ ] Door-5 scheduler: cron nudges on stale deals (user-approved sends only)
 - [ ] Telegram bot (same `/api/agent` brain)
-- [ ] Full chat workspace sidebars (PRD §8)
 - [ ] Polish: compare landing vs `docs/ui-reference.png`
