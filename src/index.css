@@ -6,6 +6,21 @@ html {
   scroll-behavior: smooth;
 }
 
+/* Calm typography: balanced headings, no orphaned body lines */
+h1, h2, h3 {
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
+
+/* Keyboard focus ring — terracotta, consistent with the accent */
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid #C45C26;
+  outline-offset: 2px;
+}
+
 body {
   @apply bg-cream text-charcoal antialiased;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', 'Helvetica Neue', Arial, sans-serif;
