@@ -13,7 +13,8 @@
 - [x] Vitest suite on `api/agent.js` (7 tests: demo mode, validation, LLM-fail fallback, SSE regression) — `npm test` → 7/7
 - [x] GitHub Actions CI: lint → test → build → secret scan on every push/PR
 - [x] Brought parallel-session endpoints to standard: `api/social-search.js` (Door 1 platform-scoped search, now on gpt-oss-120b) + `api/profile-check.js` (Door 2 footprint checks)
-- [ ] Verify `/api/social-search` + `/api/profile-check` response times from prod (slow from dev network; test in browser)
+- [x] Verified prod response times: `/api/social-search` 0.6–1.1s, `/api/profile-check` ~1.0s (correct payload `{username, platform}`) — both HTTP 200
+- [x] Fixed door videos not rendering: source MP4s were MPEG-4 Part 2 (browser-incompatible) → re-encoded to H.264/yuv420p +faststart (40% smaller). Commit + redeploy required.
 
 ## 🔜 TODO (waiting on user)
 ### Supabase auth — real magic-link emails
