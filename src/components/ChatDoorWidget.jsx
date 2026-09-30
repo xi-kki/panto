@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ChatWorkspace from './chat/ChatWorkspace.jsx'
+import ChatSidebar from './chat/ChatSidebar.jsx'
+import useConversations from '../lib/useConversations.js'
 
 const QUICK_PROMPTS = [
   'Find me organic seeds',
@@ -12,12 +14,35 @@ const QUICK_PROMPTS = [
  * Chat door widget — PRD §7 (critical interaction).
  * Closed: 64px sage circle with breathing pulse. Opening: shrivel
  * scale 1→0.8→0 then window pops from same origin with overshoot.
+ * Open: chat window + slide-in conversation-history sidebar.
  */
 export default function ChatDoorWidget() {
   const [open, setOpen] = useState(false)
 
+  const {
+    conversations,
+    activeId,
+    active,
+    newConversation,
+    selectConversation,
+    removeConversation,
+    refresh,
+  } = useConversations()
+
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Keep sidebar fresh as messages stream in (titles derive + reorder).
+  useEffect(() => {
+    if (!open || !activeId) return
+    const t = setInterval(refresh, 1500)
+    return () => clearInterval(t)
+  }, [open, activeId, refresh])
+
   const openChat = () => setOpen(true)
-  const closeChat = () => setOpen(false)
+  const closeChat = () => {
+    setOpen(false)
+    setSidebarOpen(false)
+  }
 
   return (
     <>
@@ -58,7 +83,27 @@ export default function ChatDoorWidget() {
             role="dialog"
             aria-label="Ask Panto chat"
           >
-            <ChatWorkspace quickPrompts={QUICK_PROMPTS} onClose={closeChat} compact />
+            {active && (
+              <ChatWorkspace
+                key={activeId}
+                quickPrompts={QUICK_PROMPTS}
+                onClose={closeChat}
+                compact
+                conversationId={activeId}
+                initialMessages={active.messages}
+                onSidebarToggle={() => setSidebarOpen((v) => !v)}
+                sidebarOpen={sidebarOpen}
+              />
+            )}
+            <ChatSidebar
+              open={sidebarOpen}
+              onClose={() => setSidebarOpen(false)}
+              activeId={activeId}
+              conversations={conversations}
+              onSelectConversation={(id) => { selectConversation(id); refresh() }}
+              onNewChat={() => { newConversation(); refresh() }}
+              onDeleteConversation={(id) => { removeConversation(id); refresh() }}
+            />
           </motion.div>
         )}
       </AnimatePresence>
